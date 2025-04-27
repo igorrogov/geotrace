@@ -42,35 +42,30 @@ fn main() {
     }
 
     let target_address_string = args.address.expect("Address must be specified");
-    let target_address = target_address_string
-        .parse()
+    let target_address = target_address_string.parse()
         .expect(format!("Invalid address: {}", target_address_string).as_str());
 
-    let iface_index = args.interface.expect("Interface must be specified");
-    let iface = datalink::interfaces()
-        .into_iter()
-        .find(|i| i.index == iface_index)
-        .expect(format!("Could not find interface by index: {}", iface_index).as_str());
+    let interface_index = args.interface.expect("Interface must be specified");
+    let interface = datalink::interfaces().into_iter()
+        .find(|i| i.index == interface_index)
+        .expect(format!("Could not find interface by index: {}", interface_index).as_str());
 
-    println!(
-        "Using interface: {} ({}, index: {})",
-        iface.description,
-        iface
-            .ips
-            .iter()
+    println!("Using interface: {} ({}, index: {})",
+             interface.description,
+             interface.ips.iter()
             .map(|ip| ip.to_string())
             .collect::<Vec<String>>()
             .join(", "),
-        iface.index
+             interface.index
     );
 
-    let (_, rx) = match datalink::channel(&iface, Default::default()) {
+    let (_, rx) = match datalink::channel(&interface, Default::default()) {
         Ok(Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => panic!("unhandled channel type"),
         Err(e) => panic!("unable to create channel: {}", e),
     };
 
-    let thread = listen_icmp(iface.mac.unwrap(), target_address, rx);
+    let thread = listen_icmp(interface.mac.unwrap(), target_address, rx);
 
     let (mut sender, _) = transport_channel(1024, Layer4(Ipv4(IpNextHeaderProtocols::Icmp)))
         .expect("transport_channel");
@@ -84,15 +79,11 @@ fn main() {
         let mut icmp_buf: Vec<u8> = vec![0; EchoRequestPacket::minimum_packet_size()];
         build_echo_request(&mut icmp_buf, attempt);
         sender.set_ttl(attempt).expect("failed to set ttl");
-        sender
-            .send_to(
-                IcmpPacket::new(&icmp_buf[..]).unwrap(),
-                IpAddr::V4(target_address),
-            )
-            .unwrap();
+        sender.send_to(IcmpPacket::new(&icmp_buf[..]).unwrap(), IpAddr::V4(target_address)).unwrap();
 
         thread::sleep(Duration::from_millis(500));
 
+        // TODO: implement proper sync between threads
         if attempt >= 20 {
             break;
         }
@@ -105,9 +96,7 @@ fn list_interfaces_and_exit() {
     let mut interfaces = datalink::interfaces();
     interfaces.sort_by_key(|k| k.index);
     interfaces.iter().for_each(|i| {
-        let ips = i
-            .ips
-            .iter()
+        let ips = i.ips.iter()
             .filter(|ip| ip.is_ipv4())
             .map(|ip| ip.ip())
             .filter(|ip| !ip.is_unspecified())
@@ -115,12 +104,7 @@ fn list_interfaces_and_exit() {
             .collect::<Vec<String>>();
 
         if !ips.is_empty() {
-            println!(
-                "Index: {:2}, IP: {}, Description: {}",
-                i.index,
-                ips.join(", "),
-                i.description
-            );
+            println!("Index: {:2}, IP: {}, Description: {}", i.index, ips.join(", "), i.description);
         }
     });
 
@@ -139,11 +123,7 @@ fn build_echo_request(buf: &mut [u8], attempt: u8) {
     echo_packet.set_checksum(echo_checksum);
 }
 
-fn listen_icmp(
-    iface_mac: MacAddr,
-    target_ip: Ipv4Addr,
-    mut rx: Box<dyn DataLinkReceiver>,
-) -> JoinHandle<()> {
+fn listen_icmp(iface_mac: MacAddr, target_ip: Ipv4Addr, mut rx: Box<dyn DataLinkReceiver>, ) -> JoinHandle<()> {
     thread::spawn(move || {
         println!("Listening for ICMP packets...");
         loop {
