@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{arg, Parser};
 use pnet::datalink;
 use pnet::datalink::Channel::Ethernet;
 use pnet::datalink::DataLinkReceiver;
@@ -18,6 +18,7 @@ use std::time::Duration;
 use std::{process, thread};
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
+use dns_lookup::lookup_addr;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -34,6 +35,10 @@ struct Args {
     #[arg(short, long)]
     #[arg(required_unless_present = "list")]
     interface: Option<u32>,
+    
+    /// Resolve IP addresses to hostnames. Default: false.
+    #[arg(short, long)]
+    resolve: bool
 }
 
 enum Message {
@@ -73,8 +78,9 @@ fn main() {
     };
 
     let (ch_tx, ch_rx) = mpsc::channel::<Message>();
-    
-    let thread = listen_icmp(interface.mac.unwrap(), target_address, eth_rx, ch_tx);
+
+    let resolve = args.resolve;
+    let thread = listen_icmp(interface.mac.unwrap(), target_address, eth_rx, ch_tx, resolve);
 
     // wait until the listening thread is started and ready to receive packets
     ch_rx.recv().expect("unable to receive message");
@@ -90,13 +96,13 @@ fn main() {
         sender.set_ttl(attempt).expect("failed to set ttl");
         sender.send_to(IcmpPacket::new(&icmp_buf[..]).unwrap(), IpAddr::V4(target_address)).unwrap();
 
-        match ch_rx.recv_timeout(Duration::from_millis(500)) { 
+        match ch_rx.recv_timeout(Duration::from_millis(500)) {
             Ok(Message::DestinationReached) => {
                 break;
             },
             _ => {}
         };
-        
+
         // max attempts reached
         if attempt >= 30 {
             println!("Max number of attempts exceeded (30)");
@@ -138,14 +144,14 @@ fn build_echo_request(buf: &mut [u8], attempt: u8) {
     echo_packet.set_checksum(echo_checksum);
 }
 
-fn listen_icmp(iface_mac: MacAddr, target_ip: Ipv4Addr, mut eth_rx: Box<dyn DataLinkReceiver>, ch_tx: Sender<Message>) -> JoinHandle<()> {
+fn listen_icmp(iface_mac: MacAddr, target_ip: Ipv4Addr, mut eth_rx: Box<dyn DataLinkReceiver>, ch_tx: Sender<Message>, resolve: bool) -> JoinHandle<()> {
     thread::spawn(move || {
         println!("Listening for ICMP packets...");
         ch_tx.send(Message::ListeningThreadReady).expect("failed to send ListeningThreadReady");
         loop {
             match eth_rx.next() {
                 Ok(packet_data) => {
-                    if handle_packet(&ch_tx, iface_mac, target_ip, packet_data) {
+                    if handle_packet(&ch_tx, iface_mac, target_ip, packet_data, resolve) {
                         return;
                     }
                 }
@@ -155,7 +161,7 @@ fn listen_icmp(iface_mac: MacAddr, target_ip: Ipv4Addr, mut eth_rx: Box<dyn Data
     })
 }
 
-fn handle_packet(ch_tx: &Sender<Message>, iface_mac: MacAddr, target_ip: Ipv4Addr, packet_data: &[u8]) -> bool {
+fn handle_packet(ch_tx: &Sender<Message>, iface_mac: MacAddr, target_ip: Ipv4Addr, packet_data: &[u8], resolve: bool) -> bool {
     let eth_packet = EthernetPacket::new(packet_data).unwrap();
 
     // TODO: implement better filtering
@@ -169,14 +175,22 @@ fn handle_packet(ch_tx: &Sender<Message>, iface_mac: MacAddr, target_ip: Ipv4Add
             let ipv4 = Ipv4Packet::new(eth_packet.payload()).unwrap();
             if ipv4.get_next_level_protocol() == IpNextHeaderProtocols::Icmp {
                 let icmp_packet = IcmpPacket::new(ipv4.payload()).expect("Icmp packet");
+                let host = if resolve {
+                    lookup_addr(&ipv4.get_source().into()).unwrap_or_else(|_| "[Unknown]".to_string())
+                }
+                else {
+                  String::from("")  
+                };
+                
                 println!(
-                    "Received from {:16} - code: {:2}, type: {:2}, seq: {:3}",
+                    "Received from {:16} - code: {:2}, type: {:2}, seq: {:3}, host: {:4}",
                     ipv4.get_source(),
                     icmp_packet.get_icmp_code().0,
                     icmp_packet.get_icmp_type().0,
-                    get_seq_number(&icmp_packet)
+                    get_seq_number(&icmp_packet),
+                    host
                 );
-                
+
                 if ipv4.get_source() == target_ip {
                     // final IP reached -> notify the main thread
                     ch_tx.send(Message::DestinationReached).expect("failed to send DestinationReached");
