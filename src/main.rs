@@ -16,6 +16,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use std::{process, thread};
+use std::sync::mpsc;
+use std::sync::mpsc::Sender;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -32,6 +34,11 @@ struct Args {
     #[arg(short, long)]
     #[arg(required_unless_present = "list")]
     interface: Option<u32>,
+}
+
+enum Message {
+    ListeningThreadReady,
+    DestinationReached
 }
 
 fn main() {
@@ -59,19 +66,21 @@ fn main() {
              interface.index
     );
 
-    let (_, rx) = match datalink::channel(&interface, Default::default()) {
+    let (_, eth_rx) = match datalink::channel(&interface, Default::default()) {
         Ok(Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => panic!("unhandled channel type"),
         Err(e) => panic!("unable to create channel: {}", e),
     };
 
-    let thread = listen_icmp(interface.mac.unwrap(), target_address, rx);
+    let (ch_tx, ch_rx) = mpsc::channel::<Message>();
+    
+    let thread = listen_icmp(interface.mac.unwrap(), target_address, eth_rx, ch_tx);
+
+    // wait until the listening thread is started and ready to receive packets
+    ch_rx.recv().expect("unable to receive message");
 
     let (mut sender, _) = transport_channel(1024, Layer4(Ipv4(IpNextHeaderProtocols::Icmp)))
         .expect("transport_channel");
-
-    // TODO: wait until the first packet is sent
-    thread::sleep(Duration::from_secs(1));
 
     let mut attempt = 0;
     loop {
@@ -81,10 +90,16 @@ fn main() {
         sender.set_ttl(attempt).expect("failed to set ttl");
         sender.send_to(IcmpPacket::new(&icmp_buf[..]).unwrap(), IpAddr::V4(target_address)).unwrap();
 
-        thread::sleep(Duration::from_millis(500));
-
-        // TODO: implement proper sync between threads
-        if attempt >= 20 {
+        match ch_rx.recv_timeout(Duration::from_millis(500)) { 
+            Ok(Message::DestinationReached) => {
+                break;
+            },
+            _ => {}
+        };
+        
+        // max attempts reached
+        if attempt >= 30 {
+            println!("Max number of attempts exceeded (30)");
             break;
         }
     }
@@ -123,13 +138,14 @@ fn build_echo_request(buf: &mut [u8], attempt: u8) {
     echo_packet.set_checksum(echo_checksum);
 }
 
-fn listen_icmp(iface_mac: MacAddr, target_ip: Ipv4Addr, mut rx: Box<dyn DataLinkReceiver>, ) -> JoinHandle<()> {
+fn listen_icmp(iface_mac: MacAddr, target_ip: Ipv4Addr, mut eth_rx: Box<dyn DataLinkReceiver>, ch_tx: Sender<Message>) -> JoinHandle<()> {
     thread::spawn(move || {
         println!("Listening for ICMP packets...");
+        ch_tx.send(Message::ListeningThreadReady).expect("failed to send ListeningThreadReady");
         loop {
-            match rx.next() {
+            match eth_rx.next() {
                 Ok(packet_data) => {
-                    if handle_packet(iface_mac, target_ip, packet_data) {
+                    if handle_packet(&ch_tx, iface_mac, target_ip, packet_data) {
                         return;
                     }
                 }
@@ -139,7 +155,7 @@ fn listen_icmp(iface_mac: MacAddr, target_ip: Ipv4Addr, mut rx: Box<dyn DataLink
     })
 }
 
-fn handle_packet(iface_mac: MacAddr, target_ip: Ipv4Addr, packet_data: &[u8]) -> bool {
+fn handle_packet(ch_tx: &Sender<Message>, iface_mac: MacAddr, target_ip: Ipv4Addr, packet_data: &[u8]) -> bool {
     let eth_packet = EthernetPacket::new(packet_data).unwrap();
 
     // TODO: implement better filtering
@@ -160,10 +176,10 @@ fn handle_packet(iface_mac: MacAddr, target_ip: Ipv4Addr, packet_data: &[u8]) ->
                     icmp_packet.get_icmp_type().0,
                     get_seq_number(&icmp_packet)
                 );
-
-                // TODO: implement proper exit
+                
                 if ipv4.get_source() == target_ip {
-                    // final IP reached
+                    // final IP reached -> notify the main thread
+                    ch_tx.send(Message::DestinationReached).expect("failed to send DestinationReached");
                     return true;
                 }
             }
