@@ -1,6 +1,5 @@
 use crate::messages::PacketReceivedMessage;
 
-use crossterm::{cursor, ExecutableCommand};
 use pnet::datalink;
 use pnet::datalink::Channel::Ethernet;
 use pnet::datalink::{DataLinkReceiver, NetworkInterface};
@@ -29,7 +28,6 @@ impl PacketListener {
     pub fn start(icmp_identifier: u16, interface_index: u32, ui_callback_tx: Sender<PacketReceivedMessage>) -> io::Result<JoinHandle<io::Result<()>>> {
 
         let interface = find_interface(interface_index)?;
-        io::stdout().execute(cursor::MoveTo(0, 0))?;
         println!("Using interface: {} ({}, index: {})",
                  interface.description,
                  interface.ips.iter()
@@ -51,8 +49,6 @@ impl PacketListener {
     
     fn run(&mut self, mut eth_rx: Box<dyn DataLinkReceiver>) -> io::Result<()> {
         // println!("Listening for ICMP packets...");
-        // TODO: do we need this?
-        // self.sender_callback_tx.send(StateMessage::ListeningThreadReady).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         loop {
             match eth_rx.next() {
                 Ok(packet_data) => self.handle_packet(packet_data),

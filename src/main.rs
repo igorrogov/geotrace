@@ -3,18 +3,19 @@ mod messages;
 mod listener;
 
 use crate::listener::PacketListener;
-use crate::messages::{StateMessage, PacketSentMessage, PacketReceivedMessage};
+use crate::messages::{PacketReceivedMessage, PacketSentMessage, StateMessage};
 use crate::sender::PacketSender;
 use clap::{arg, Parser};
-use crossterm::{cursor, terminal, ExecutableCommand};
-use pnet::datalink;
-use std::sync::mpsc;
-use std::{io, process};
-use std::collections::HashMap;
-use std::sync::mpsc::Receiver;
 use crossterm::style::Print;
+use crossterm::{cursor, queue, terminal};
 use dns_lookup::lookup_addr;
+use pnet::datalink;
 use rand::Rng;
+use std::collections::HashMap;
+use std::io::Write;
+use std::sync::mpsc;
+use std::sync::mpsc::Receiver;
+use std::{io, process};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -48,8 +49,15 @@ fn main() -> io::Result<()> {
     let mut rng = rand::rng();
     let icmp_identifier: u16 = rng.random();
 
-    io::stdout().execute(terminal::Clear(terminal::ClearType::All))?;
-
+    let mut stdout = io::stdout();
+    
+    queue!(stdout, 
+        cursor::Hide, 
+        cursor::MoveTo(0, 0), 
+        terminal::Clear(terminal::ClearType::All)
+    )?;
+    stdout.flush()?;
+    
     let target = args.address.expect("missing address").parse().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let interface_index = args.interface.expect("missing interface");
 
@@ -88,17 +96,13 @@ fn main() -> io::Result<()> {
         if sent_time > 0 {
             ping = msg.timestamp - sent_time;
         }
-        
-        io::stdout().execute(cursor::MoveTo(0, msg.seq_number + 1)).expect("move cursor");
-        io::stdout().execute(terminal::Clear(terminal::ClearType::CurrentLine)).expect("failed to clear line");
 
-        io::stdout().execute(Print(format!(
-            "{:2}. {:16} - time: {:5}ms, host: {:3}",
-            msg.seq_number,
-            msg.source_address,
-            ping,
-            host
-        ))).expect("failed to print");
+        queue!(stdout,
+            cursor::MoveTo(0, msg.seq_number + 1), 
+            terminal::Clear(terminal::ClearType::CurrentLine),
+            Print(format!("{:2}. {:16} - time: {:5}ms, host: {:3}", msg.seq_number, msg.source_address, ping, host))
+        )?;
+        stdout.flush()?;
     }
     
     Ok(())
