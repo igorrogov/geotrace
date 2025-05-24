@@ -1,15 +1,9 @@
-use std::collections::HashMap;
-use std::{io, thread};
-use std::net::Ipv4Addr;
-use std::sync::mpsc::{Receiver, Sender};
-use std::thread::JoinHandle;
-use std::time::SystemTime;
-use crossterm::{cursor, terminal, ExecutableCommand};
-use crossterm::style::Print;
-use dns_lookup::lookup_addr;
+use crate::messages::PacketReceivedMessage;
+
+use crossterm::{cursor, ExecutableCommand};
 use pnet::datalink;
-use pnet::datalink::{DataLinkReceiver, NetworkInterface};
 use pnet::datalink::Channel::Ethernet;
+use pnet::datalink::{DataLinkReceiver, NetworkInterface};
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet::packet::icmp::echo_reply::EchoReplyPacket;
 use pnet::packet::icmp::echo_request::EchoRequestPacket;
@@ -17,22 +11,21 @@ use pnet::packet::icmp::IcmpPacket;
 use pnet::packet::icmp::IcmpTypes::EchoReply;
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::Ipv4Packet;
-use pnet::packet::Packet;
 use pnet::packet::vlan::VlanPacket;
-use crate::messages::{Message, PacketSentMessage};
+use pnet::packet::Packet;
+use std::sync::mpsc::Sender;
+use std::thread::JoinHandle;
+use std::time::SystemTime;
+use std::{io, thread};
 
 pub struct PacketListener {
-    target: Ipv4Addr,
-    resolve: bool,
     interface: NetworkInterface,
-    ch_tx: Sender<Message>,
-    pch_rx: Receiver<PacketSentMessage>,
-    timestamps: HashMap<u8, u128>,
+    ui_callback_tx: Sender<PacketReceivedMessage>,
 }
 
 impl PacketListener {
 
-    pub fn start(interface_index: u32, target: Ipv4Addr, resolve: bool, ch_tx: Sender<Message>, pch_rx: Receiver<PacketSentMessage>,) -> io::Result<JoinHandle<io::Result<()>>> {
+    pub fn start(interface_index: u32, ui_callback_tx: Sender<PacketReceivedMessage>) -> io::Result<JoinHandle<io::Result<()>>> {
 
         let interface = find_interface(interface_index)?;
         io::stdout().execute(cursor::MoveTo(0, 0))?;
@@ -50,15 +43,15 @@ impl PacketListener {
             Ok(_) => return Err(io::Error::new(io::ErrorKind::Other, "unhandled channel type")),
             Err(e) => return Err(io::Error::new(io::ErrorKind::Other, format!("unable to create channel: {}", e))),
         };
-
-        let timestamps = HashMap::<u8, u128>::new();
-        let mut packet_listener = PacketListener { target, resolve, interface, ch_tx, pch_rx, timestamps };
+        
+        let mut packet_listener = PacketListener { interface, ui_callback_tx };
         Ok(thread::spawn(move || { packet_listener.run(eth_rx) }))
     }
     
     fn run(&mut self, mut eth_rx: Box<dyn DataLinkReceiver>) -> io::Result<()> {
         // println!("Listening for ICMP packets...");
-        self.ch_tx.send(Message::ListeningThreadReady).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        // TODO: do we need this?
+        // self.sender_callback_tx.send(StateMessage::ListeningThreadReady).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         loop {
             match eth_rx.next() {
                 Ok(packet_data) => self.handle_packet(packet_data),
@@ -99,58 +92,11 @@ impl PacketListener {
         let ipv4 = Ipv4Packet::new(payload).unwrap();
         if ipv4.get_next_level_protocol() == IpNextHeaderProtocols::Icmp {
             let icmp_packet = IcmpPacket::new(ipv4.payload()).expect("Icmp packet");
-            let host = if self.resolve {
-                lookup_addr(&ipv4.get_source().into()).unwrap_or_else(|_| "[Unknown]".to_string())
-            } else {
-                String::from("")
-            };
-
             let seq_number = get_seq_number(&icmp_packet, ipv4.payload()) as u8;
-
-            // io::stdout().execute(cursor::MoveTo(0, 1)).expect("move cursor");
-            // io::stdout().execute(Print(format!("Received packet: {}", seq_number))).unwrap();
-
-            io::stdout().execute(cursor::MoveTo(0, (seq_number + 1) as u16)).expect("move cursor");
-            io::stdout().execute(terminal::Clear(terminal::ClearType::CurrentLine)).expect("failed to clear line");
-
-            self.read_new_timestamps();
-
-            let sent_time = match self.timestamps.get(&seq_number) {
-                Some(t) => *t,
-                None => 0u128,
-            };
-
-            let mut ping = 0u128;
-            if sent_time > 0 {
-                let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
-                ping = now - sent_time;
-            }
-
-            io::stdout().execute(Print(format!(
-                "{:2}. {:16} - code: {:2}, type: {:2}, time: {:5}ms, host: {:3}",
-                seq_number,
-                ipv4.get_source(),
-                icmp_packet.get_icmp_code().0,
-                icmp_packet.get_icmp_type().0,
-                ping,
-                host
-            ))).expect("failed to print");
-
-            if ipv4.get_source() == self.target {
-                // final IP reached -> notify the main thread
-                self.ch_tx.send(Message::DestinationReached(seq_number as u16)).expect("failed to send DestinationReached");
-            }
-        }
-    }
-
-    fn read_new_timestamps(&mut self) {
-        loop {
-            match self.pch_rx.try_recv() {
-                Ok(PacketSentMessage { index, timestamp }) => {
-                    self.timestamps.insert(index, timestamp);
-                },
-                Err(_) => break, // no more packets for now, exit
-            }
+            let timestamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+            self.ui_callback_tx.send(PacketReceivedMessage { timestamp, seq_number, 
+                source_address: ipv4.get_source(), icmp_code: icmp_packet.get_icmp_code(), icmp_type: icmp_packet.get_icmp_type() })
+                .expect("failed to send packet");
         }
     }
 
