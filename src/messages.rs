@@ -1,5 +1,4 @@
 use std::net::Ipv4Addr;
-use pnet::packet::icmp::{IcmpCode, IcmpType};
 
 pub enum StateMessage {
     ListeningThreadReady,
@@ -13,8 +12,6 @@ pub struct PacketSentMessage {
 
 pub struct PacketReceivedMessage {
     pub timestamp: u128,
-    pub seq_number: u8,
+    pub seq_number: u16,
     pub source_address: Ipv4Addr,
-    pub icmp_code: IcmpCode,
-    pub icmp_type: IcmpType,
 }

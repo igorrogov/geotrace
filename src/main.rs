@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
 use crossterm::style::Print;
 use dns_lookup::lookup_addr;
+use rand::Rng;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -43,6 +44,10 @@ fn main() -> io::Result<()> {
         list_interfaces_and_exit();
     }
 
+    // generate random IDs to distinguish between our and other ICMP replies
+    let mut rng = rand::rng();
+    let icmp_identifier: u16 = rng.random();
+
     io::stdout().execute(terminal::Clear(terminal::ClearType::All))?;
 
     let target = args.address.expect("missing address").parse().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
@@ -52,10 +57,10 @@ fn main() -> io::Result<()> {
     let (timestamps_ch_tx, timestamps_ch_rx) = mpsc::channel::<PacketSentMessage>();
     let (ui_callback_tx, ui_callback_rx) = mpsc::channel::<PacketReceivedMessage>();
 
-    PacketListener::start(interface_index, ui_callback_tx)?;
-    PacketSender::start(target, state_ch_rx, timestamps_ch_tx)?;
+    PacketListener::start(icmp_identifier, interface_index, ui_callback_tx)?;
+    PacketSender::start(target, icmp_identifier, state_ch_rx, timestamps_ch_tx)?;
 
-    let mut timestamps = HashMap::<u8, u128>::new();
+    let mut timestamps = HashMap::<u16, u128>::new();
     
     // UI loop
     while let Ok(msg) = ui_callback_rx.recv() {
@@ -71,7 +76,7 @@ fn main() -> io::Result<()> {
 
         if msg.source_address == target {
             // final IP reached -> notify the main thread
-            state_ch_tx.send(StateMessage::DestinationReached(msg.seq_number as u16)).expect("failed to send DestinationReached");
+            state_ch_tx.send(StateMessage::DestinationReached(msg.seq_number)).expect("failed to send DestinationReached");
         }
 
         let sent_time = match timestamps.get(&msg.seq_number) {
@@ -84,15 +89,13 @@ fn main() -> io::Result<()> {
             ping = msg.timestamp - sent_time;
         }
         
-        io::stdout().execute(cursor::MoveTo(0, (msg.seq_number + 1) as u16)).expect("move cursor");
+        io::stdout().execute(cursor::MoveTo(0, msg.seq_number + 1)).expect("move cursor");
         io::stdout().execute(terminal::Clear(terminal::ClearType::CurrentLine)).expect("failed to clear line");
 
         io::stdout().execute(Print(format!(
-            "{:2}. {:16} - code: {:2}, type: {:2}, time: {:5}ms, host: {:3}",
+            "{:2}. {:16} - time: {:5}ms, host: {:3}",
             msg.seq_number,
             msg.source_address,
-            msg.icmp_code.0,
-            msg.icmp_type.0,
             ping,
             host
         ))).expect("failed to print");
@@ -101,11 +104,11 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn read_new_timestamps(rx: &Receiver<PacketSentMessage>, timestamps: &mut HashMap<u8, u128>) {
+fn read_new_timestamps(rx: &Receiver<PacketSentMessage>, timestamps: &mut HashMap<u16, u128>) {
     loop {
         match rx.try_recv() {
             Ok(PacketSentMessage { index, timestamp }) => {
-                timestamps.insert(index, timestamp);
+                timestamps.insert(index as u16, timestamp);
             },
             Err(_) => break, // no more packets for now, exit
         }

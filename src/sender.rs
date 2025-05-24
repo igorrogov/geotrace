@@ -15,6 +15,7 @@ use std::{io, thread};
 
 pub struct PacketSender {
     target: Ipv4Addr,
+    icmp_identifier: u16,
     transport_sender: TransportSender,
     timestamps_ch_tx: Sender<PacketSentMessage>,
     state_ch_rx: Receiver<StateMessage>
@@ -22,9 +23,9 @@ pub struct PacketSender {
 
 impl PacketSender {
 
-    pub fn start(target: Ipv4Addr, state_ch_rx: Receiver<StateMessage>, timestamps_ch_tx: Sender<PacketSentMessage>) -> io::Result<JoinHandle<io::Result<()>>> {
+    pub fn start(target: Ipv4Addr, icmp_identifier: u16, state_ch_rx: Receiver<StateMessage>, timestamps_ch_tx: Sender<PacketSentMessage>) -> io::Result<JoinHandle<io::Result<()>>> {
         let (transport_sender, _) = transport_channel(1024, Layer4(Ipv4(IpNextHeaderProtocols::Icmp)))?;
-        let mut packet_sender = PacketSender { transport_sender, target, timestamps_ch_tx, state_ch_rx };
+        let mut packet_sender = PacketSender { target, icmp_identifier, transport_sender, timestamps_ch_tx, state_ch_rx };
         Ok(thread::spawn(move || { packet_sender.run() }))
     }
     
@@ -38,7 +39,7 @@ impl PacketSender {
         loop {
             attempt += 1;
             let mut icmp_buf: Vec<u8> = vec![0; EchoRequestPacket::minimum_packet_size()];
-            Self::build_echo_request(&mut icmp_buf, attempt);
+            Self::build_echo_request(&mut icmp_buf, attempt, self.icmp_identifier);
             self.transport_sender.set_ttl(attempt)?;
 
             let timestamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
@@ -62,11 +63,11 @@ impl PacketSender {
         }
     }
 
-    fn build_echo_request(buf: &mut [u8], attempt: u8) {
+    fn build_echo_request(buf: &mut [u8], attempt: u8, icmp_identifier: u16) {
         let mut echo_packet = MutableEchoRequestPacket::new(buf).unwrap();
 
         echo_packet.set_sequence_number(attempt as u16);
-        echo_packet.set_identifier(0x123);
+        echo_packet.set_identifier(icmp_identifier);
         echo_packet.set_icmp_type(IcmpTypes::EchoRequest);
         echo_packet.set_icmp_code(IcmpCode::new(0));
 
