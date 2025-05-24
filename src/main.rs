@@ -1,13 +1,13 @@
 mod tracer;
+mod sender;
+mod messages;
+mod listener;
 
 use crate::tracer::Tracer;
 
 use clap::{arg, Parser};
 use crossterm::{cursor, terminal, ExecutableCommand};
 use pnet::datalink;
-use pnet::packet::icmp::echo_request::MutableEchoRequestPacket;
-use pnet::packet::icmp::{checksum, IcmpCode, IcmpPacket, IcmpTypes};
-use pnet::packet::Packet;
 use std::{io, process};
 
 #[derive(Parser, Debug)]
@@ -75,14 +75,4 @@ fn list_interfaces_and_exit() {
     process::exit(0);
 }
 
-fn build_echo_request(buf: &mut [u8], attempt: u8) {
-    let mut echo_packet = MutableEchoRequestPacket::new(buf).unwrap();
 
-    echo_packet.set_sequence_number(attempt as u16);
-    echo_packet.set_identifier(0x123);
-    echo_packet.set_icmp_type(IcmpTypes::EchoRequest);
-    echo_packet.set_icmp_code(IcmpCode::new(0));
-
-    let echo_checksum = checksum(&IcmpPacket::new(echo_packet.packet()).unwrap());
-    echo_packet.set_checksum(echo_checksum);
-}
