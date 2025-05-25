@@ -2,21 +2,21 @@ mod sender;
 mod messages;
 mod listener;
 
-use io::{Error, ErrorKind};
 use crate::listener::PacketListener;
 use crate::messages::{PacketReceivedMessage, PacketSentMessage, StateMessage};
 use crate::sender::PacketSender;
 use clap::{arg, Parser};
 use crossterm::style::Print;
-use crossterm::{cursor, queue, terminal};
+use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::{cursor, execute, terminal};
+use io::{Error, ErrorKind};
 use pnet::datalink;
 use rand::Rng;
 use std::collections::HashMap;
-use std::io::Write;
-use std::sync::mpsc;
-use std::sync::mpsc::Receiver;
-use std::{io, process};
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc;
+use std::{io, process};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -52,12 +52,17 @@ fn main() -> io::Result<()> {
 
     let mut stdout = io::stdout();
 
-    queue!(stdout,
+    ctrlc::set_handler(move || {
+        execute!(io::stdout(), LeaveAlternateScreen).expect("Error leaving alternate screen");
+        process::exit(0);
+    }).map_err(|e| Error::new(ErrorKind::Interrupted, e))?;
+    
+    execute!(stdout,
+        EnterAlternateScreen,
         cursor::Hide,
         cursor::MoveTo(0, 0),
         terminal::Clear(terminal::ClearType::All)
     )?;
-    stdout.flush()?;
 
     let target = parse_or_resolve_address(args.address)?;
     let interface_index = args.interface.expect("missing interface");
@@ -98,12 +103,11 @@ fn main() -> io::Result<()> {
             ping = msg.timestamp - sent_time;
         }
 
-        queue!(stdout,
+        execute!(stdout,
             cursor::MoveTo(0, msg.seq_number + 1),
             terminal::Clear(terminal::ClearType::CurrentLine),
             Print(format!("{:2}. {:16} - time: {:5}ms, host: {:3}", msg.seq_number, msg.source_address, ping, host))
         )?;
-        stdout.flush()?;
     }
     
     Ok(())
