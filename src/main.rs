@@ -2,13 +2,13 @@ mod sender;
 mod messages;
 mod listener;
 
+use io::{Error, ErrorKind};
 use crate::listener::PacketListener;
 use crate::messages::{PacketReceivedMessage, PacketSentMessage, StateMessage};
 use crate::sender::PacketSender;
 use clap::{arg, Parser};
 use crossterm::style::Print;
 use crossterm::{cursor, queue, terminal};
-use dns_lookup::lookup_addr;
 use pnet::datalink;
 use rand::Rng;
 use std::collections::HashMap;
@@ -16,6 +16,7 @@ use std::io::Write;
 use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
 use std::{io, process};
+use std::net::{IpAddr, Ipv4Addr};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -24,7 +25,7 @@ struct Args {
     #[arg(short, long)]
     list: bool,
 
-    /// IP address to traceroute
+    /// IP address or hostname to traceroute
     #[arg(required_unless_present = "list")]
     address: Option<String>,
 
@@ -50,15 +51,15 @@ fn main() -> io::Result<()> {
     let icmp_identifier: u16 = rng.random();
 
     let mut stdout = io::stdout();
-    
-    queue!(stdout, 
-        cursor::Hide, 
-        cursor::MoveTo(0, 0), 
+
+    queue!(stdout,
+        cursor::Hide,
+        cursor::MoveTo(0, 0),
         terminal::Clear(terminal::ClearType::All)
     )?;
     stdout.flush()?;
-    
-    let target = args.address.expect("missing address").parse().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+
+    let target = parse_or_resolve_address(args.address)?;
     let interface_index = args.interface.expect("missing interface");
 
     let (state_ch_tx, state_ch_rx) = mpsc::channel::<StateMessage>();
@@ -77,7 +78,7 @@ fn main() -> io::Result<()> {
         read_new_timestamps(&timestamps_ch_rx, &mut timestamps);
         
         let host = if args.resolve {
-            lookup_addr(&msg.source_address.into()).unwrap_or_else(|_| "[Unknown]".to_string())
+            dns_lookup::lookup_addr(&msg.source_address.into()).unwrap_or_else(|_| "[Unknown]".to_string())
         } else {
             String::from("")
         };
@@ -98,7 +99,7 @@ fn main() -> io::Result<()> {
         }
 
         queue!(stdout,
-            cursor::MoveTo(0, msg.seq_number + 1), 
+            cursor::MoveTo(0, msg.seq_number + 1),
             terminal::Clear(terminal::ClearType::CurrentLine),
             Print(format!("{:2}. {:16} - time: {:5}ms, host: {:3}", msg.seq_number, msg.source_address, ping, host))
         )?;
@@ -106,17 +107,6 @@ fn main() -> io::Result<()> {
     }
     
     Ok(())
-}
-
-fn read_new_timestamps(rx: &Receiver<PacketSentMessage>, timestamps: &mut HashMap<u16, u128>) {
-    loop {
-        match rx.try_recv() {
-            Ok(PacketSentMessage { index, timestamp }) => {
-                timestamps.insert(index as u16, timestamp);
-            },
-            Err(_) => break, // no more packets for now, exit
-        }
-    }
 }
 
 fn list_interfaces_and_exit() {
@@ -138,4 +128,31 @@ fn list_interfaces_and_exit() {
     process::exit(0);
 }
 
+fn parse_or_resolve_address(value: Option<String>) -> io::Result<Ipv4Addr> {
+    let string_value = value.ok_or(Error::new(ErrorKind::InvalidInput, "Address not specified"))?;
+    match string_value.parse::<Ipv4Addr>() {
+        Ok(ip) => Ok(ip),
+        Err(_) => { 
+            // try to resolve the value as a hostname
+            let ips = dns_lookup::lookup_host(&string_value)?;
+            let first_ip = ips.into_iter()
+                .find(|addr| addr.is_ipv4())
+                .ok_or(Error::new(ErrorKind::InvalidInput, "Could not resolve an IPv4 address"))?;
+            match first_ip {
+                IpAddr::V4(ip) => Ok(ip),
+                IpAddr::V6(_) => Err(Error::new(ErrorKind::InvalidInput, "Could not resolve an IPv4 address")),
+            }
+        }
+    }
+}
 
+fn read_new_timestamps(rx: &Receiver<PacketSentMessage>, timestamps: &mut HashMap<u16, u128>) {
+    loop {
+        match rx.try_recv() {
+            Ok(PacketSentMessage { index, timestamp }) => {
+                timestamps.insert(index as u16, timestamp);
+            },
+            Err(_) => break, // no more packets for now, exit
+        }
+    }
+}
