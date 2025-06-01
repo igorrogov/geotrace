@@ -1,9 +1,10 @@
 mod sender;
 mod messages;
 mod listener;
+mod parser;
 
 use crate::listener::PacketListener;
-use crate::messages::{PacketReceivedMessage, PacketSentMessage, StateMessage};
+use crate::messages::StateMessage;
 use crate::sender::PacketSender;
 use clap::{arg, Parser};
 use crossterm::style::Print;
@@ -12,9 +13,7 @@ use crossterm::{cursor, execute, terminal};
 use io::{Error, ErrorKind};
 use pnet::datalink;
 use rand::Rng;
-use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::mpsc::Receiver;
 use std::sync::mpsc;
 use std::{io, process};
 
@@ -39,6 +38,25 @@ struct Args {
     resolve: bool
 }
 
+#[derive(Debug, Clone)]
+struct Entry {
+
+    index: u16,
+    address: Option<Ipv4Addr>,
+    hostname: Option<String>,
+    last_sent_time: u128,
+    last_ping: u128,
+    
+}
+
+impl Entry {
+    
+    fn new(index: u16) -> Entry {
+        Entry {index, address: None, hostname: None, last_sent_time: 0, last_ping: 0}
+    }
+    
+}
+
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
@@ -46,6 +64,8 @@ fn main() -> io::Result<()> {
         list_interfaces_and_exit();
     }
 
+    const MAX_HOPS: usize = 32;
+    
     // generate random IDs to distinguish between our and other ICMP replies
     let mut rng = rand::rng();
     let icmp_identifier: u16 = rng.random();
@@ -67,49 +87,77 @@ fn main() -> io::Result<()> {
     let target = parse_or_resolve_address(args.address)?;
     let interface_index = args.interface.expect("missing interface");
 
-    let (state_ch_tx, state_ch_rx) = mpsc::channel::<StateMessage>();
-    let (timestamps_ch_tx, timestamps_ch_rx) = mpsc::channel::<PacketSentMessage>();
-    let (ui_callback_tx, ui_callback_rx) = mpsc::channel::<PacketReceivedMessage>();
+    let (ui_callback_tx, ui_callback_rx) = mpsc::channel::<StateMessage>();
+    let (sender_callback_tx, sender_callback_rx) = mpsc::channel::<StateMessage>();
+    
+    PacketListener::start(interface_index, ui_callback_tx.clone())?;
+    PacketSender::start(target, icmp_identifier, sender_callback_rx, ui_callback_tx, MAX_HOPS as u8)?;
 
-    PacketListener::start(icmp_identifier, interface_index, ui_callback_tx)?;
-    PacketSender::start(target, icmp_identifier, state_ch_rx, timestamps_ch_tx)?;
-
-    let mut timestamps = HashMap::<u16, u128>::new();
+    let mut entries: [Entry; MAX_HOPS] = std::array::from_fn(|i| Entry::new(i as u16));
     
     // UI loop
     while let Ok(msg) = ui_callback_rx.recv() {
 
-        // read new timestamps
-        read_new_timestamps(&timestamps_ch_rx, &mut timestamps);
-        
-        let host = if args.resolve {
-            dns_lookup::lookup_addr(&msg.source_address.into()).unwrap_or_else(|_| "[Unknown]".to_string())
-        } else {
-            String::from("")
-        };
+        match msg {
+            StateMessage::PacketSent(index, sent_time) => {
+                if index > MAX_HOPS as u16 {
+                    continue;
+                }
+                let entry = &mut entries[index as usize];
+                entry.last_sent_time = sent_time;
+                draw_entry(&entry)?;
+            },
+            StateMessage::PacketReceived(timestamp, payload) => {
+                match parser::parse(&payload) {
+                    None => {}
+                    Some(packet) => {
+                        if packet.icmp_identifier != icmp_identifier {
+                            // ICMP reply from a different app / source, ignore
+                            continue;
+                        }
 
-        if msg.source_address == target {
-            // final IP reached -> notify the main thread
-            state_ch_tx.send(StateMessage::DestinationReached(msg.seq_number)).expect("failed to send DestinationReached");
+                        if packet.index > MAX_HOPS as u16 {
+                            continue;
+                        }
+                        
+                        let entry = &mut entries[packet.index as usize];
+                        entry.address = Some(packet.address);
+                        entry.last_ping = timestamp - entry.last_sent_time;
+
+                        if entry.hostname.is_none() {
+                            // TODO: async resolve
+                            entry.hostname = Some(if args.resolve {
+                                dns_lookup::lookup_addr(&packet.address.into()).unwrap_or_else(|_| "[Unknown]".to_string())
+                            } else {
+                                String::from("")
+                            });
+                        }
+
+                        draw_entry(&entry)?;
+
+                        // notify about destination reached
+                        if packet.address == target {
+                            // final IP reached -> notify the main thread
+                            sender_callback_tx.send(StateMessage::DestinationReached(packet.index)).expect("failed to send DestinationReached");
+                        }
+                    }
+                }
+            },
+            _ => {}
         }
-
-        let sent_time = match timestamps.get(&msg.seq_number) {
-            Some(t) => *t,
-            None => 0u128,
-        };
-
-        let mut ping = 0u128;
-        if sent_time > 0 {
-            ping = msg.timestamp - sent_time;
-        }
-
-        execute!(stdout,
-            cursor::MoveTo(0, msg.seq_number + 1),
-            terminal::Clear(terminal::ClearType::CurrentLine),
-            Print(format!("{:2}. {:16} - time: {:5}ms, host: {:3}", msg.seq_number, msg.source_address, ping, host))
-        )?;
     }
     
+    Ok(())
+}
+
+fn draw_entry(entry: &Entry) -> io::Result<()> {
+    let hostname = entry.hostname.as_deref().unwrap_or("");
+    let address = entry.address.unwrap_or(Ipv4Addr::UNSPECIFIED);
+    execute!(io::stdout(),
+        cursor::MoveTo(0, entry.index + 1),
+        terminal::Clear(terminal::ClearType::CurrentLine),
+        Print(format!("{:2}. {:16} - time: {:5}ms, host: {:3}", entry.index, address, entry.last_ping, hostname))
+            )?;
     Ok(())
 }
 
@@ -146,17 +194,6 @@ fn parse_or_resolve_address(value: Option<String>) -> io::Result<Ipv4Addr> {
                 IpAddr::V4(ip) => Ok(ip),
                 IpAddr::V6(_) => Err(Error::new(ErrorKind::InvalidInput, "Could not resolve an IPv4 address")),
             }
-        }
-    }
-}
-
-fn read_new_timestamps(rx: &Receiver<PacketSentMessage>, timestamps: &mut HashMap<u16, u128>) {
-    loop {
-        match rx.try_recv() {
-            Ok(PacketSentMessage { index, timestamp }) => {
-                timestamps.insert(index as u16, timestamp);
-            },
-            Err(_) => break, // no more packets for now, exit
         }
     }
 }
