@@ -7,6 +7,9 @@ pub enum StateMessage {
     PacketReceived(u128, Vec<u8>),
     // to Sender: packet sequence number where the destination was reached
     DestinationReached(u16),
+    ResolveRequest(u16, Ipv4Addr),
+    // IP address has been resolved: index, address
+    AddressResolved(u16, String),
 }
 
 pub struct ParsedPacket {

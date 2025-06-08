@@ -2,6 +2,7 @@ mod sender;
 mod messages;
 mod listener;
 mod parser;
+mod dns_resolver;
 
 use crate::listener::PacketListener;
 use crate::messages::StateMessage;
@@ -93,9 +94,11 @@ fn main() -> io::Result<()> {
 
     let (ui_callback_tx, ui_callback_rx) = mpsc::channel::<StateMessage>();
     let (sender_callback_tx, sender_callback_rx) = mpsc::channel::<StateMessage>();
+    let (dns_callback_tx, dns_callback_rx) = mpsc::channel::<StateMessage>();
     
     PacketListener::start(interface_index, ui_callback_tx.clone())?;
-    PacketSender::start(target, icmp_identifier, sender_callback_rx, ui_callback_tx, MAX_HOPS as u8)?;
+    PacketSender::start(target, icmp_identifier, sender_callback_rx, ui_callback_tx.clone(), MAX_HOPS as u8)?;
+    dns_resolver::start(dns_callback_rx, ui_callback_tx)?;
 
     let mut entries: [Entry; MAX_HOPS] = std::array::from_fn(|i| Entry::new(i as u16));
     
@@ -128,13 +131,10 @@ fn main() -> io::Result<()> {
                         entry.address = Some(packet.address);
                         entry.last_ping = timestamp - entry.last_sent_time;
 
-                        if entry.hostname.is_none() {
-                            // TODO: async resolve
-                            entry.hostname = Some(if args.resolve {
-                                dns_lookup::lookup_addr(&packet.address.into()).unwrap_or_else(|_| "[Unknown]".to_string())
-                            } else {
-                                String::from("")
-                            });
+                        if args.resolve && entry.hostname.is_none() {
+                            // resolve IP address async
+                            dns_callback_tx.send(StateMessage::ResolveRequest(packet.index, packet.address))
+                                .expect("failed to send ResolveRequest");
                         }
 
                         draw_entry(&entry)?;
@@ -142,10 +142,16 @@ fn main() -> io::Result<()> {
                         // notify about destination reached
                         if packet.address == target {
                             // final IP reached -> notify the main thread
-                            sender_callback_tx.send(StateMessage::DestinationReached(packet.index)).expect("failed to send DestinationReached");
+                            sender_callback_tx.send(StateMessage::DestinationReached(packet.index))
+                                .expect("failed to send DestinationReached");
                         }
                     }
                 }
+            },
+            StateMessage::AddressResolved(index, hostname) => {
+                let entry = &mut entries[index as usize];
+                entry.hostname = Some(hostname);
+                draw_entry(&entry)?;
             },
             _ => {}
         }
