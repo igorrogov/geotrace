@@ -7,7 +7,7 @@ use crate::listener::PacketListener;
 use crate::messages::StateMessage;
 use crate::sender::PacketSender;
 use clap::{arg, Parser};
-use crossterm::style::Print;
+use crossterm::style::{Attribute, Print, PrintStyledContent, Stylize};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{cursor, execute, terminal};
 use io::{Error, ErrorKind};
@@ -16,6 +16,7 @@ use rand::Rng;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::mpsc;
 use std::{io, process};
+use Attribute::Bold;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -76,16 +77,19 @@ fn main() -> io::Result<()> {
         execute!(io::stdout(), LeaveAlternateScreen).expect("Error leaving alternate screen");
         process::exit(0);
     }).map_err(|e| Error::new(ErrorKind::Interrupted, e))?;
-    
-    execute!(stdout,
-        EnterAlternateScreen,
-        cursor::Hide,
-        cursor::MoveTo(0, 0),
-        terminal::Clear(terminal::ClearType::All)
-    )?;
 
     let target = parse_or_resolve_address(args.address)?;
     let interface_index = args.interface.expect("missing interface");
+
+    execute!(stdout,
+        EnterAlternateScreen,
+        cursor::Hide,
+        terminal::Clear(terminal::ClearType::All),
+        cursor::MoveTo(0, 0),
+        Print(format!("Target address:  {}", target)),
+        cursor::MoveTo(0, 3),
+        PrintStyledContent(format!("{:>4}   {:<18}{:>10}   {}", "Hop", "IP Address", "Ping", "Hostname").attribute(Bold)),
+    )?;
 
     let (ui_callback_tx, ui_callback_rx) = mpsc::channel::<StateMessage>();
     let (sender_callback_tx, sender_callback_rx) = mpsc::channel::<StateMessage>();
@@ -154,10 +158,10 @@ fn draw_entry(entry: &Entry) -> io::Result<()> {
     let hostname = entry.hostname.as_deref().unwrap_or("");
     let address = entry.address.unwrap_or(Ipv4Addr::UNSPECIFIED);
     execute!(io::stdout(),
-        cursor::MoveTo(0, entry.index + 1),
+        cursor::MoveTo(0, entry.index + 3),
         terminal::Clear(terminal::ClearType::CurrentLine),
-        Print(format!("{:2}. {:16} - time: {:5}ms, host: {:3}", entry.index, address, entry.last_ping, hostname))
-            )?;
+        Print(format!("{:3}.   {:18}{:>8}ms   {}", entry.index, address, entry.last_ping, hostname))
+    )?;
     Ok(())
 }
 

@@ -9,6 +9,8 @@ use std::sync::mpsc::Sender;
 use std::thread::JoinHandle;
 use std::{io, thread};
 use std::time::SystemTime;
+use crossterm::{cursor, execute, terminal};
+use crossterm::style::Print;
 
 pub struct PacketListener {
     interface: NetworkInterface,
@@ -20,14 +22,15 @@ impl PacketListener {
     pub fn start(interface_index: u32, ui_callback_tx: Sender<StateMessage>) -> io::Result<JoinHandle<io::Result<()>>> {
 
         let interface = find_interface(interface_index)?;
-        println!("Using interface: {} ({}, index: {})",
-                 interface.description,
-                 interface.ips.iter()
-                     .map(|ip| ip.to_string())
-                     .collect::<Vec<String>>()
-                     .join(", "),
-                 interface.index
-        );
+        let local_addr = interface.ips.iter()
+            .map(|ip| ip.to_string())
+            .collect::<Vec<String>>()
+            .join(", ");
+        execute!(io::stdout(),
+            cursor::MoveTo(0, 1),
+            terminal::Clear(terminal::ClearType::CurrentLine),
+            Print(format!("Using interface: {} ({}, index: {})", interface.description, local_addr, interface.index))
+        )?;
 
         let (_, eth_rx) = match datalink::channel(&interface, Default::default()) {
             Ok(Ethernet(tx, rx)) => (tx, rx),
