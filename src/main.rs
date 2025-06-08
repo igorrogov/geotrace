@@ -75,7 +75,10 @@ fn main() -> io::Result<()> {
     let mut stdout = io::stdout();
 
     ctrlc::set_handler(move || {
-        execute!(io::stdout(), LeaveAlternateScreen).expect("Error leaving alternate screen");
+        execute!(io::stdout(),
+            cursor::Show,
+            LeaveAlternateScreen)
+            .expect("Error leaving alternate screen");
         process::exit(0);
     }).map_err(|e| Error::new(ErrorKind::Interrupted, e))?;
 
