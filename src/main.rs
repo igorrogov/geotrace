@@ -101,6 +101,8 @@ fn main() -> io::Result<()> {
     dns_resolver::start(dns_callback_rx, ui_callback_tx)?;
 
     let mut entries: [Entry; MAX_HOPS] = std::array::from_fn(|i| Entry::new(i as u16));
+    let mut destination_index: Option<u16> = None;
+    let mut max_entry_displayed = 0u16;
     
     // UI loop
     while let Ok(msg) = ui_callback_rx.recv() {
@@ -110,6 +112,10 @@ fn main() -> io::Result<()> {
                 if index > MAX_HOPS as u16 {
                     continue;
                 }
+                if destination_index.is_some() && index > destination_index.unwrap() {
+                    continue;
+                }
+                
                 let entry = &mut entries[index as usize];
                 entry.last_sent_time = sent_time;
                 draw_entry(&entry)?;
@@ -122,8 +128,10 @@ fn main() -> io::Result<()> {
                             // ICMP reply from a different app / source, ignore
                             continue;
                         }
-
                         if packet.index > MAX_HOPS as u16 {
+                            continue;
+                        }
+                        if destination_index.is_some() && packet.index > destination_index.unwrap() {
                             continue;
                         }
                         
@@ -138,17 +146,35 @@ fn main() -> io::Result<()> {
                         }
 
                         draw_entry(&entry)?;
+                        
+                        if packet.index > max_entry_displayed {
+                            max_entry_displayed = packet.index;
+                        }
 
                         // notify about destination reached
-                        if packet.address == target {
+                        if destination_index.is_none() && packet.address == target {
+                            destination_index = Some(packet.index);
                             // final IP reached -> notify the main thread
                             sender_callback_tx.send(StateMessage::DestinationReached(packet.index))
                                 .expect("failed to send DestinationReached");
+                            
+                            // clear all entries beyond destination
+                            if max_entry_displayed > packet.index {
+                                for row in (packet.index + 1)..MAX_HOPS as u16 {
+                                    execute!(io::stdout(),  
+                                        cursor::MoveTo(0, row),
+                                        terminal::Clear(terminal::ClearType::CurrentLine)
+                                    )?;
+                                }
+                            }
                         }
                     }
                 }
             },
             StateMessage::AddressResolved(index, hostname) => {
+                if destination_index.is_some() && index > destination_index.unwrap() {
+                    continue;
+                }
                 let entry = &mut entries[index as usize];
                 entry.hostname = Some(hostname);
                 draw_entry(&entry)?;
