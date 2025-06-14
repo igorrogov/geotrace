@@ -121,7 +121,7 @@ fn main() -> io::Result<()> {
                 
                 let entry = &mut entries[index as usize];
                 entry.last_sent_time = sent_time;
-                draw_entry(&entry)?;
+                draw_entry(&entry, &mut max_entry_displayed)?;
             },
             StateMessage::PacketReceived(timestamp, payload) => {
                 match parser::parse(&payload) {
@@ -148,11 +148,7 @@ fn main() -> io::Result<()> {
                                 .expect("failed to send ResolveRequest");
                         }
 
-                        draw_entry(&entry)?;
-                        
-                        if packet.index > max_entry_displayed {
-                            max_entry_displayed = packet.index;
-                        }
+                        draw_entry(&entry, &mut max_entry_displayed)?;
 
                         // notify about destination reached
                         if destination_index.is_none() && packet.address == target {
@@ -163,9 +159,9 @@ fn main() -> io::Result<()> {
                             
                             // clear all entries beyond destination
                             if max_entry_displayed > packet.index {
-                                for row in (packet.index + 1)..MAX_HOPS as u16 {
+                                for row in (packet.index + 1)..(max_entry_displayed + 1) {
                                     execute!(io::stdout(),  
-                                        cursor::MoveTo(0, row),
+                                        cursor::MoveTo(0, row + 3),
                                         terminal::Clear(terminal::ClearType::CurrentLine)
                                     )?;
                                 }
@@ -180,7 +176,7 @@ fn main() -> io::Result<()> {
                 }
                 let entry = &mut entries[index as usize];
                 entry.hostname = Some(hostname);
-                draw_entry(&entry)?;
+                draw_entry(&entry, &mut max_entry_displayed)?;
             },
             _ => {}
         }
@@ -189,7 +185,7 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn draw_entry(entry: &Entry) -> io::Result<()> {
+fn draw_entry(entry: &Entry, max_entry_displayed: &mut u16) -> io::Result<()> {
     let hostname = entry.hostname.as_deref().unwrap_or("");
     let address = entry.address.unwrap_or(Ipv4Addr::UNSPECIFIED);
     execute!(io::stdout(),
@@ -197,6 +193,11 @@ fn draw_entry(entry: &Entry) -> io::Result<()> {
         terminal::Clear(terminal::ClearType::CurrentLine),
         Print(format!("{:3}.   {:18}{:>8}ms   {}", entry.index, address, entry.last_ping, hostname))
     )?;
+    
+    if entry.index > *max_entry_displayed {
+        *max_entry_displayed = entry.index;
+    }
+    
     Ok(())
 }
 
