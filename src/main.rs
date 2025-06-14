@@ -3,6 +3,7 @@ mod messages;
 mod listener;
 mod parser;
 mod dns_resolver;
+mod whois_resolver;
 
 use crate::listener::PacketListener;
 use crate::messages::StateMessage;
@@ -46,15 +47,18 @@ struct Entry {
     index: u16,
     address: Option<Ipv4Addr>,
     hostname: Option<String>,
+    netname: Option<String>,
     last_sent_time: u128,
     last_ping: u128,
     
+    dns_request_sent: bool,
+    whois_request_sent: bool,
 }
 
 impl Entry {
     
     fn new(index: u16) -> Entry {
-        Entry {index, address: None, hostname: None, last_sent_time: 0, last_ping: 0}
+        Entry {index, address: None, hostname: None, netname: None, last_sent_time: 0, last_ping: 0, dns_request_sent: false, whois_request_sent: false}
     }
     
 }
@@ -92,16 +96,18 @@ fn main() -> io::Result<()> {
         cursor::MoveTo(0, 0),
         Print(format!("Target address:  {}", target)),
         cursor::MoveTo(0, 3),
-        PrintStyledContent(format!("{:>4}   {:<18}{:>10}   {}", "Hop", "IP Address", "Ping", "Hostname").attribute(Bold)),
+        PrintStyledContent(format!("{:>4}   {:<18}{:>10}   {:<50}{:<25}", "Hop", "IP Address", "Ping", "Hostname", "Netname").attribute(Bold)),
     )?;
 
     let (ui_callback_tx, ui_callback_rx) = mpsc::channel::<StateMessage>();
     let (sender_callback_tx, sender_callback_rx) = mpsc::channel::<StateMessage>();
     let (dns_callback_tx, dns_callback_rx) = mpsc::channel::<StateMessage>();
+    let (whois_callback_tx, whois_callback_rx) = mpsc::channel::<StateMessage>();
     
     PacketListener::start(interface_index, ui_callback_tx.clone())?;
     PacketSender::start(target, icmp_identifier, sender_callback_rx, ui_callback_tx.clone(), MAX_HOPS as u8)?;
-    dns_resolver::start(dns_callback_rx, ui_callback_tx)?;
+    dns_resolver::start(dns_callback_rx, ui_callback_tx.clone())?;
+    whois_resolver::start(whois_callback_rx, ui_callback_tx)?;
 
     let mut entries: [Entry; MAX_HOPS] = std::array::from_fn(|i| Entry::new(i as u16));
     let mut destination_index: Option<u16> = None;
@@ -142,10 +148,17 @@ fn main() -> io::Result<()> {
                         entry.address = Some(packet.address);
                         entry.last_ping = timestamp - entry.last_sent_time;
 
-                        if args.resolve && entry.hostname.is_none() {
+                        if args.resolve && entry.hostname.is_none() && !entry.dns_request_sent {
                             // resolve IP address async
-                            dns_callback_tx.send(StateMessage::ResolveRequest(packet.index, packet.address))
+                            dns_callback_tx.send(StateMessage::DnsResolveRequest(packet.index, packet.address))
                                 .expect("failed to send ResolveRequest");
+                            entry.dns_request_sent = true;
+                        }
+                        if args.resolve && entry.netname.is_none() && !entry.whois_request_sent {
+                            // resolve nem name via Whois async
+                            whois_callback_tx.send(StateMessage::WhoiseResolveRequest(packet.index, packet.address))
+                                .expect("failed to send WhoiseResolveRequest");
+                            entry.whois_request_sent = true;
                         }
 
                         draw_entry(&entry, &mut max_entry_displayed)?;
@@ -170,12 +183,20 @@ fn main() -> io::Result<()> {
                     }
                 }
             },
-            StateMessage::AddressResolved(index, hostname) => {
+            StateMessage::DnsResolveResponse(index, hostname) => {
                 if destination_index.is_some() && index > destination_index.unwrap() {
                     continue;
                 }
                 let entry = &mut entries[index as usize];
                 entry.hostname = Some(hostname);
+                draw_entry(&entry, &mut max_entry_displayed)?;
+            },
+            StateMessage::WhoiseResolveResponse(index, netname) => {
+                if destination_index.is_some() && index > destination_index.unwrap() {
+                    continue;
+                }
+                let entry = &mut entries[index as usize];
+                entry.netname = Some(netname);
                 draw_entry(&entry, &mut max_entry_displayed)?;
             },
             _ => {}
@@ -186,12 +207,22 @@ fn main() -> io::Result<()> {
 }
 
 fn draw_entry(entry: &Entry, max_entry_displayed: &mut u16) -> io::Result<()> {
-    let hostname = entry.hostname.as_deref().unwrap_or("");
-    let address = entry.address.unwrap_or(Ipv4Addr::UNSPECIFIED);
+    let hostname = match entry.hostname.as_deref() {
+        Some(hostname) => hostname,
+        None => if entry.dns_request_sent { "Resolving..." } else { "" },
+    };
+    let netname = match entry.netname.as_deref() {
+        Some(netname) => netname,
+        None => if entry.whois_request_sent { "Resolving..." } else { "" },
+    };
+    let address = match entry.address {
+        Some(address) => address.to_string(),
+        None => "Waiting...".to_string(),
+    };
     execute!(io::stdout(),
         cursor::MoveTo(0, entry.index + 3),
         terminal::Clear(terminal::ClearType::CurrentLine),
-        Print(format!("{:3}.   {:18}{:>8}ms   {}", entry.index, address, entry.last_ping, hostname))
+        Print(format!("{:3}.   {:18}{:>8}ms   {:<50}{:<25}", entry.index, address, entry.last_ping, hostname, netname))
     )?;
     
     if entry.index > *max_entry_displayed {

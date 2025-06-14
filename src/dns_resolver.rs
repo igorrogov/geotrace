@@ -6,10 +6,10 @@ pub fn start(rx: Receiver<StateMessage>, ui_callback_tx: Sender<StateMessage>) -
     thread::spawn(move || {
         while let Ok(msg) =  rx.recv() {
             match msg {
-                StateMessage::ResolveRequest(index, address) => {
+                StateMessage::DnsResolveRequest(index, address) => {
                     let hostname = dns_lookup::lookup_addr(&address.into())
                         .unwrap_or_else(|_| "".to_string());
-                    ui_callback_tx.send(StateMessage::AddressResolved(index, hostname))
+                    ui_callback_tx.send(StateMessage::DnsResolveResponse(index, hostname))
                         .expect("failed to send AddressResolved");
                 },
                 _ => {}
