@@ -50,7 +50,7 @@ struct Entry {
     netname: Option<String>,
     last_sent_time: u128,
     last_ping: u128,
-    
+
     dns_request_sent: bool,
     whois_request_sent: bool,
 }
@@ -109,7 +109,7 @@ fn main() -> io::Result<()> {
     dns_resolver::start(dns_callback_rx, ui_callback_tx.clone())?;
     whois_resolver::start(whois_callback_rx, ui_callback_tx)?;
 
-    let mut entries: [Entry; MAX_HOPS] = std::array::from_fn(|i| Entry::new(i as u16));
+    let mut entries: [Entry; MAX_HOPS+1] = std::array::from_fn(|i| Entry::new(i as u16));
     let mut destination_index: Option<u16> = None;
     let mut max_entry_displayed = 0u16;
     
@@ -224,11 +224,11 @@ fn draw_entry(entry: &Entry, max_entry_displayed: &mut u16) -> io::Result<()> {
         terminal::Clear(terminal::ClearType::CurrentLine),
         Print(format!("{:3}.   {:18}{:>8}ms   {:<50}{:<25}", entry.index, address, entry.last_ping, hostname, netname))
     )?;
-    
+
     if entry.index > *max_entry_displayed {
         *max_entry_displayed = entry.index;
     }
-    
+
     Ok(())
 }
 
